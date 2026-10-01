@@ -1,0 +1,1742 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SERPENT PROTOCOL: Garden of Eden</title>
+  <style>
+    :root {
+      --bg: #0f380f;
+      --dark: #0f380f;
+      --mid: #306230;
+      --light: #8bac0f;
+      --bright: #9bbc0f;
+      --amber: #d9c16a;
+      --red: #af2b2b;
+      --crimson: #8b1a1a;
+      --gold: #d8a13a;
+      --white: #e8f0d8;
+      --shadow: rgba(0, 0, 0, 0.45);
+    }
+
+    html, body {
+      margin: 0;
+      width: 100%;
+      height: 100%;
+      background: #070d09;
+      color: var(--bright);
+      font-family: "Courier New", monospace;
+      overflow: hidden;
+      image-rendering: pixelated;
+    }
+
+    body {
+      display: grid;
+      place-items: center;
+      user-select: none;
+      -webkit-user-select: none;
+      touch-action: none;
+    }
+
+    #game-shell {
+      position: relative;
+      width: min(92vw, 860px);
+      height: min(92vh, 720px);
+      display: grid;
+      place-items: center;
+      background: #040b06;
+      border: 4px solid var(--bright);
+      box-shadow: inset 0 0 0 4px rgba(155, 188, 15, 0.2), 0 0 22px rgba(0,0,0,0.5);
+    }
+
+    canvas {
+      width: 100%;
+      height: 100%;
+      display: block;
+      background: var(--dark);
+      image-rendering: pixelated;
+    }
+    
+    .hidden { display: none !important; }
+  </style>
+</head>
+<body>
+  <div id="game-shell">
+    <canvas id="game" width="960" height="720"></canvas>
+  </div>
+
+  <script>
+    (() => {
+      const canvas = document.getElementById('game');
+      const ctx = canvas.getContext('2d');
+      ctx.imageSmoothingEnabled = false;
+
+      const CONFIG = {
+        COLS: 24,
+        ROWS: 24,
+        CELL: 20,
+        BOARD_W: 480,
+        BOARD_H: 480,
+        SCORE_X: 30,
+        SCORE_Y: 22,
+        UI_TOP: 0,
+        HORIZ_PAD: 18,
+        PLAY_X: 30,
+        PLAY_Y: 90,
+        sideW: 210,
+        titleOpacity: 1,
+        growthPerApple: 2,
+        comboWindow: 2500,
+        goldenChance: 0.08,
+        maxCombo: 4,
+        touchTapDeadZone: 26,
+        defaultDifficulty: 'normal',
+        minVolume: 0,
+        maxVolume: 1
+      };
+
+      const COLORS = {
+        dark: '#0f380f',
+        mid: '#306230',
+        light: '#8bac0f',
+        bright: '#9bbc0f',
+        white: '#e8f0d8',
+        amber: '#d7bc64',
+        crimson: '#8b1a1a',
+        red: '#cf3a3a',
+        gold: '#d8a13a',
+        violet: '#3d1a4d',
+        cyan: '#0f4d52',
+        bone: '#5a5a4a',
+        shadow: 'rgba(0,0,0,0.45)'
+      };
+
+      const Storage = (() => {
+        const key = 'serpent_prot_eden_save_v1';
+        let mem = {
+          progress: {
+            unlockedLevel: 1,
+            bestScores: {},
+            deaths: {},
+            lore: [],
+            endings: { consume: false, refuse: false },
+            unlocks: { endless: false, rivalMode: false },
+            settings: { volume: 0.8, sfx: 0.8, shake: true, scanlines: true, difficulty: 'normal' }
+          }
+        };
+
+        function load() {
+          try {
+            const raw = localStorage.getItem(key);
+            if (!raw) return structuredClone(mem.progress);
+            const parsed = JSON.parse(raw);
+            return Object.assign(structuredClone(mem.progress), parsed);
+          } catch (e) {
+            return structuredClone(mem.progress);
+          }
+        }
+
+        function save(data) {
+          try {
+            localStorage.setItem(key, JSON.stringify(data));
+          } catch (e) {
+            mem.progress = data;
+          }
+        }
+
+        function get() {
+          if (!mem.progress || !mem.progress.settings) mem.progress = structuredClone({
+            unlockedLevel: 1,
+            bestScores: {},
+            deaths: {},
+            lore: [],
+            endings: { consume: false, refuse: false },
+            unlocks: { endless: false, rivalMode: false },
+            settings: { volume: 0.8, sfx: 0.8, shake: true, scanlines: true, difficulty: 'normal' }
+          });
+          return mem.progress;
+        }
+
+        return { get, save, load };
+      })();
+
+      const STORAGE = Storage;
+      let SAVE = STORAGE.get();
+      let activeDifficulty = SAVE.settings.difficulty || 'normal';
+
+      const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+      const rand = (min, max) => Math.random() * (max - min) + min;
+      const choose = arr => arr[Math.floor(Math.random() * arr.length)];
+      const dist = (a, b) => Math.abs(a.x - b.x) + Math.abs(a.y - b.y);
+      const keyOf = (x, y) => x + ':' + y;
+
+      const Audio = (() => {
+        let ctx = null;
+        let masterGain = null;
+        let started = false;
+        let schedulerHandle = null;
+        let musicState = null;
+        let currentAct = 1;
+
+        const soundMap = {
+          chomp: { type: 'square', duration: 0.06, freqStart: 220, freqEnd: 420, gain: 0.18 },
+          golden: { type: 'triangle', duration: 0.25, notes: [392, 523.25, 783.99], gain: 0.22 },
+          turn: { type: 'square', duration: 0.012, freqStart: 1100, freqEnd: 720, gain: 0.05 },
+          death: { type: 'sawtooth', duration: 0.5, freqStart: 400, freqEnd: 60, gain: 0.22 },
+          levelClear: { type: 'square', duration: 0.18, notes: [392, 494, 587, 659, 784], gain: 0.18 },
+          rivalDown: { type: 'square', duration: 0.12, notes: [220, 156], gain: 0.15 },
+          menuMove: { type: 'square', duration: 0.03, freqStart: 520, freqEnd: 580, gain: 0.08 },
+          menuSelect: { type: 'square', duration: 0.05, freqStart: 600, freqEnd: 840, gain: 0.1 }
+        };
+
+        function ensureContext() {
+          if (ctx) return;
+          try {
+            const AudioCtor = window.AudioContext || window.webkitAudioContext;
+            if (!AudioCtor) return;
+            ctx = new AudioCtor();
+            masterGain = ctx.createGain();
+            masterGain.gain.value = SAVE.settings.volume || 0.8;
+            masterGain.connect(ctx.destination);
+          } catch (e) {
+            ctx = null;
+            masterGain = null;
+          }
+        }
+
+        function getVolume() {
+          const vol = SAVE.settings.volume || 0.8;
+          return clamp(vol, 0, 1);
+        }
+
+        function play(name, opts = {}) {
+          if (!ctx || !masterGain) return;
+          if (document.visibilityState === 'hidden') return;
+          const cfg = soundMap[name] || {};
+          const gainVal = (opts.gain ?? cfg.gain ?? 0.1) * (getVolume() * 0.7 + 0.1);
+          const now = ctx.currentTime;
+          const oscillator = ctx.createOscillator();
+          const gain = ctx.createGain();
+          oscillator.type = opts.type || cfg.type || 'square';
+          const start = opts.freqStart ?? cfg.freqStart ?? 220;
+          const end = opts.freqEnd ?? cfg.freqEnd ?? start;
+          oscillator.frequency.setValueAtTime(start, now);
+          if (end !== start) oscillator.frequency.exponentialRampToValueAtTime(Math.max(20, end), now + (opts.duration || cfg.duration || 0.08));
+          gain.gain.setValueAtTime(0.0001, now);
+          gain.gain.exponentialRampToValueAtTime(Math.max(0.0001, gainVal), now + 0.01);
+          gain.gain.exponentialRampToValueAtTime(0.0001, now + (opts.duration || cfg.duration || 0.08));
+          oscillator.connect(gain);
+          gain.connect(masterGain);
+          oscillator.start(now);
+          oscillator.stop(now + (opts.duration || cfg.duration || 0.08) + 0.02);
+        }
+
+        function playTone(name, freq, gain) {
+          play(name, { freqStart: freq, freqEnd: freq, duration: 0.04, gain, type: 'square' });
+        }
+
+        function scheduleMusic() {
+          if (!ctx || !masterGain) return;
+          if (schedulerHandle) clearTimeout(schedulerHandle);
+          const seqs = {
+            1: [0, 2, 4, 7, 0, 2, 5, 7],
+            2: [0, 3, 5, 7, 0, 3, 6, 7],
+            3: [0, 2, 7, 9, 0, 2, 5, 9],
+            4: [0, 5, 9, 12, 0, 5, 9, 12]
+          };
+          const act = currentAct;
+          const base = act <= 4 ? 0.3 : act <= 8 ? 0.2 : act <= 11 ? 0.15 : 0.12;
+          const melody = seqs[(act - 1) % 4 + 1] || seqs[1];
+          const now = ctx.currentTime + 0.05;
+
+          for (let i = 0; i < melody.length; i++) {
+            const note = melody[i];
+            const hz = 130.81 * Math.pow(2, (note / 12));
+            const osc = ctx.createOscillator();
+            const gainNode = ctx.createGain();
+            osc.type = 'square';
+            osc.frequency.setValueAtTime(hz, now + i * base);
+            gainNode.gain.setValueAtTime(0.0001, now + i * base);
+            gainNode.gain.exponentialRampToValueAtTime(0.05, now + i * base + 0.02);
+            gainNode.gain.exponentialRampToValueAtTime(0.0001, now + i * base + 0.15);
+            osc.connect(gainNode);
+            gainNode.connect(masterGain);
+            osc.start(now + i * base);
+            osc.stop(now + i * base + 0.16);
+
+            if (i % 2 === 0) {
+              const drum = ctx.createOscillator();
+              const drumGain = ctx.createGain();
+              drum.type = 'triangle';
+              drum.frequency.setValueAtTime(100, now + i * base);
+              drum.frequency.exponentialRampToValueAtTime(45, now + i * base + 0.04);
+              drumGain.gain.setValueAtTime(0.0001, now + i * base);
+              drumGain.gain.exponentialRampToValueAtTime(0.02, now + i * base + 0.01);
+              drumGain.gain.exponentialRampToValueAtTime(0.0001, now + i * base + 0.04);
+              drum.connect(drumGain);
+              drumGain.connect(masterGain);
+              drum.start(now + i * base);
+              drum.stop(now + i * base + 0.05);
+            }
+          }
+
+          schedulerHandle = setTimeout(scheduleMusic, 2000);
+        }
+
+        function setAct(act) {
+          currentAct = act;
+          if (ctx) scheduleMusic();
+        }
+
+        function init() {
+          ensureContext();
+          if (!ctx || !masterGain) return;
+          if (ctx.state === 'suspended') ctx.resume();
+          if (!started) {
+            started = true;
+            scheduleMusic();
+          }
+        }
+
+        function setMaster(v) {
+          if (!masterGain) return;
+          masterGain.gain.value = clamp(v, 0, 1);
+        }
+
+        return { init, play, playTone, setAct, setMaster, ensureContext };
+      })();
+
+      const Input = (() => {
+        const states = {
+          left: false,
+          right: false,
+          up: false,
+          down: false
+        };
+        let touchStart = null;
+        let lastKey = null;
+
+        function setKeyState(code, pressed) {
+          const keyMap = {
+            ArrowLeft: 'left', ArrowRight: 'right', ArrowUp: 'up', ArrowDown: 'down',
+            a: 'left', d: 'right', w: 'up', s: 'down',
+            A: 'left', D: 'right', W: 'up', S: 'down'
+          };
+          const dir = keyMap[code];
+          if (dir) states[dir] = pressed;
+        }
+
+        function queueDirection(game, dir) {
+          if (!game || !game.player) return;
+          game.player.queueDirection(dir);
+        }
+
+        function handleKeyDown(e) {
+          const code = e.key || e.code || '';
+          if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'a', 'A', 'w', 'W', 's', 'S', 'd', 'D'].includes(code)) {
+            e.preventDefault();
+          }
+          if (code === ' ' || code === 'Spacebar') {
+            e.preventDefault();
+            if (Game && Game.state === 'BOOT') return;
+            if (Game && Game.state === 'TITLE') Game.confirmTitle();
+            if (Game && Game.state === 'INTRO') Game.advanceIntro();
+            if (Game && Game.state === 'DEAD') Game.retryChoice();
+            if (Game && Game.state === 'CLEAR') Game.advanceClear();
+            if (Game && Game.state === 'ENDING') Game.advanceEnding();
+            return;
+          }
+          if (code === 'Enter') {
+            e.preventDefault();
+            if (Game && Game.state === 'TITLE') Game.confirmTitle();
+            if (Game && Game.state === 'INTRO') Game.advanceIntro();
+            if (Game && Game.state === 'DEAD') Game.retryChoice();
+            if (Game && Game.state === 'CLEAR') Game.advanceClear();
+            return;
+          }
+          if (code === 'Escape') {
+            e.preventDefault();
+            if (Game && (Game.state === 'PLAY' || Game.state === 'PAUSE')) Game.togglePause();
+            return;
+          }
+          if (code === 'l' || code === 'L') {
+            if (Game && Game.state === 'TITLE') Game.openLore();
+            return;
+          }
+
+          if (code === 'ArrowLeft' || code === 'a' || code === 'A') queueDirection(Game, 'left');
+          if (code === 'ArrowRight' || code === 'd' || code === 'D') queueDirection(Game, 'right');
+          if (code === 'ArrowUp' || code === 'w' || code === 'W') queueDirection(Game, 'up');
+          if (code === 'ArrowDown' || code === 's' || code === 'S') queueDirection(Game, 'down');
+          lastKey = code;
+        }
+
+        function handleTouchStart(evt) {
+          const t = evt.touches[0];
+          touchStart = { x: t.clientX, y: t.clientY };
+        }
+
+        function handleTouchEnd(evt) {
+          if (!touchStart || !Game || !Game.player) return;
+          const t = evt.changedTouches[0];
+          const dx = t.clientX - touchStart.x;
+          const dy = t.clientY - touchStart.y;
+          touchStart = null;
+          const absX = Math.abs(dx), absY = Math.abs(dy);
+          if (Math.max(absX, absY) < CONFIG.touchTapDeadZone) return;
+          if (absX > absY) {
+            queueDirection(Game, dx > 0 ? 'right' : 'left');
+          } else {
+            queueDirection(Game, dy > 0 ? 'down' : 'up');
+          }
+        }
+
+        document.addEventListener('keydown', handleKeyDown, { passive: false });
+        canvas.addEventListener('touchstart', handleTouchStart, { passive: true });
+        canvas.addEventListener('touchend', handleTouchEnd, { passive: true });
+
+        return { setKeyState, handleKeyDown, handleTouchStart, handleTouchEnd };
+      })();
+
+      const Grid = (() => {
+        function inBounds(x, y) {
+          return x >= 0 && x < CONFIG.COLS && y >= 0 && y < CONFIG.ROWS;
+        }
+
+        function cellPos(x, y) {
+          return { x: CONFIG.PLAY_X + x * CONFIG.CELL, y: CONFIG.PLAY_Y + y * CONFIG.CELL };
+        }
+
+        function randomFreeCell(level, occupied = [], appleBlock = []) {
+          let tries = 0;
+          while (tries < 800) {
+            const x = Math.floor(Math.random() * CONFIG.COLS);
+            const y = Math.floor(Math.random() * CONFIG.ROWS);
+            const occupiedKey = keyOf(x, y);
+            if (!isWallAt(level, x, y) && !occupied.some(s => s.some(seg => seg.x === x && seg.y === y)) && !appleBlock.some(a => a.x === x && a.y === y) && !occupiedKey.includes(':')) {
+              return { x, y };
+            }
+            tries++;
+          }
+          return { x: 1, y: 1 };
+        }
+
+        function randomEdgeCell(level) {
+          const edges = [];
+          for (let x = 0; x < CONFIG.COLS; x++) for (let y = 0; y < CONFIG.ROWS; y++) {
+            if (x === 0 || y === 0 || x === CONFIG.COLS - 1 || y === CONFIG.ROWS - 1) edges.push({ x, y });
+          }
+          return choose(edges);
+        }
+
+        function isWallAt(level, x, y) {
+          const map = level.wallMap || {};
+          if (map[x] && map[x][y]) return true;
+          if (level.wrapEdges) return false;
+          return x < 0 || x >= CONFIG.COLS || y < 0 || y >= CONFIG.ROWS;
+        }
+
+        function rectForCell(x, y) {
+          return { x: CONFIG.PLAY_X + x * CONFIG.CELL, y: CONFIG.PLAY_Y + y * CONFIG.CELL, w: CONFIG.CELL, h: CONFIG.CELL };
+        }
+
+        function cellCenter(x, y) {
+          return {
+            x: CONFIG.PLAY_X + x * CONFIG.CELL + CONFIG.CELL / 2,
+            y: CONFIG.PLAY_Y + y * CONFIG.CELL + CONFIG.CELL / 2,
+          };
+        }
+
+        return { inBounds, cellPos, randomFreeCell, randomEdgeCell, isWallAt, rectForCell, cellCenter };
+      })();
+
+      function makeSnake({ x, y, dir = 'right', color = COLORS.bright, name = 'SERPENT', rival = false, palette = ['#9bbc0f', '#8bac0f'], body = null }) {
+        const head = { x, y };
+        const segments = body ? body.map(p => ({ x: p.x, y: p.y })) : [head, { x: x - 1, y }, { x: x - 2, y }];
+        const snake = {
+          id: Math.random().toString(16).slice(2),
+          name,
+          color,
+          palette,
+          body: segments,
+          direction: dir,
+          queuedDirs: [],
+          alive: true,
+          glow: 0,
+          type: rival ? 'rival' : 'player',
+          lockedInput: false,
+          lastTurnAt: 0,
+          growBoost: 0,
+          delay: 0,
+          deathCause: null,
+          lastMoveTick: 0,
+          telegraph: 0,
+          poison: false,
+          skippedInput: 0,
+          isPlayer: !rival
+        };
+
+        snake.head = () => snake.body[0];
+        snake.tail = () => snake.body[snake.body.length - 1];
+        snake.length = () => snake.body.length;
+        snake.queueDirection = (dir) => {
+          if (!dir) return;
+          const dirMap = { left: { x: -1, y: 0 }, right: { x: 1, y: 0 }, up: { x: 0, y: -1 }, down: { x: 0, y: 1 } };
+          const nw = dirMap[dir];
+          const cur = snake.direction;
+          const current = dirMap[cur] || { x: 1, y: 0 };
+          if (nw && (nw.x === -current.x && nw.y === -current.y)) return;
+          if (snake.queuedDirs.length < 2) {
+            const same = snake.queuedDirs.some(v => v === dir);
+            if (!same) snake.queuedDirs.push(dir);
+          }
+        };
+
+        snake.consumeDir = () => {
+          if (snake.queuedDirs.length) {
+            const next = snake.queuedDirs.shift();
+            const cur = snake.direction;
+            const dirMap = { left: { x: -1, y: 0 }, right: { x: 1, y: 0 }, up: { x: 0, y: -1 }, down: { x: 0, y: 1 } };
+            const nextVec = dirMap[next];
+            const curVec = dirMap[cur];
+            if (nextVec && curVec && (nextVec.x === -curVec.x && nextVec.y === -curVec.y)) {
+              return false;
+            }
+            snake.direction = next;
+            return true;
+          }
+          return false;
+        };
+
+        snake.step = (level, options = {}) => {
+          const dirs = { left: { x: -1, y: 0 }, right: { x: 1, y: 0 }, up: { x: 0, y: -1 }, down: { x: 0, y: 1 } };
+          const prev = { ...snake.head() };
+          if (snake.queuedDirs.length) {
+            const dir = snake.queuedDirs.shift();
+            const nextVec = dirs[dir];
+            const curVec = dirs[snake.direction];
+            if (!(nextVec && curVec && nextVec.x === -curVec.x && nextVec.y === -curVec.y)) snake.direction = dir;
+          }
+
+          const v = dirs[snake.direction];
+          const hx = snake.head().x + v.x;
+          const hy = snake.head().y + v.y;
+
+          const nextHead = { x: hx, y: hy };
+          let cause = null;
+          let dead = false;
+
+          if (level && level.wrapEdges) {
+            nextHead.x = (nextHead.x + CONFIG.COLS) % CONFIG.COLS;
+            nextHead.y = (nextHead.y + CONFIG.ROWS) % CONFIG.ROWS;
+          }
+
+          if (!level || !level.wrapEdges) {
+            if (nextHead.x < 0 || nextHead.x >= CONFIG.COLS || nextHead.y < 0 || nextHead.y >= CONFIG.ROWS) {
+              dead = true;
+              cause = 'Wall';
+            }
+          }
+
+          if (!dead) {
+            const collidesSelf = snake.body.slice(1).some(seg => seg.x === nextHead.x && seg.y === nextHead.y);
+            const headAdjacentNeck = snake.body[1] && snake.body[1].x === nextHead.x && snake.body[1].y === nextHead.y;
+            if (collidesSelf && !headAdjacentNeck) {
+              dead = true;
+              cause = 'Your own tail';
+            }
+          }
+
+          if (!dead && options.rivals) {
+            const rivalHurt = options.rivals.some(r => r !== snake && r.alive && r.body.some(seg => seg.x === nextHead.x && seg.y === nextHead.y));
+            if (rivalHurt) {
+              dead = true;
+              cause = 'Rival';
+            }
+          }
+
+          if (dead) {
+            snake.alive = false;
+            snake.deathCause = cause;
+            return { dead, cause, nextHead: prev, head: prev };
+          }
+
+          snake.body.unshift(nextHead);
+          if (snake.growBoost > 0) {
+            snake.growBoost -= 1;
+          } else {
+            snake.body.pop();
+          }
+
+          return { dead, cause: null, nextHead, head: nextHead };
+        };
+
+        snake.grow = (n = 1) => {
+          snake.growBoost += n;
+        };
+
+        return snake;
+      }
+
+      const Rival = (() => {
+        function makeRival(name, type, x, y, level) {
+          const palettes = {
+            VIPER: ['#8b1a1a', '#e04a4a'],
+            GRUB: ['#6b4a12', '#d8a13a'],
+            PHANTOM: ['#3d1a4d', '#b46ce0'],
+            ECHO: ['#0f4d52', '#4fd8e0'],
+            TITAN: ['#5a5a4a', '#e8e8d0']
+          };
+          const snake = makeSnake({ x, y, dir: 'left', color: palettes[type][0], name, rival: true, palette: palettes[type] });
+          snake.typeName = type;
+          snake.strategy = type;
+          snake.delay = 0;
+          snake.reactionDelayTicks = 0;
+          snake.spawn = { x, y };
+          snake.dead = false;
+          snake.respawnTimer = 0;
+          snake.teleportTimer = 0;
+          snake.lastDecision = { x: x, y: y };
+          return snake;
+        }
+
+        function enemyAtCell(rivals, x, y, ignoreId) {
+          return rivals.some(r => r.alive && r.id !== ignoreId && r.body.some(s => s.x === x && s.y === y));
+        }
+
+        function getAvailableDirections(level, snake, blockedSet = null) {
+          const dirs = [
+            { name: 'left', x: -1, y: 0 },
+            { name: 'right', x: 1, y: 0 },
+            { name: 'up', x: 0, y: -1 },
+            { name: 'down', x: 0, y: 1 }
+          ];
+          const list = [];
+          const head = snake.head();
+          for (const d of dirs) {
+            let nx = head.x + d.x;
+            let ny = head.y + d.y;
+            if (level.wrapEdges) {
+              nx = (nx + CONFIG.COLS) % CONFIG.COLS;
+              ny = (ny + CONFIG.ROWS) % CONFIG.ROWS;
+            }
+            if (level.wrapEdges || (nx >= 0 && nx < CONFIG.COLS && ny >= 0 && ny < CONFIG.ROWS)) {
+              const block = blockedSet ? blockedSet.has(keyOf(nx, ny)) : false;
+              const bodyHit = snake.body.some(seg => seg.x === nx && seg.y === ny);
+              if (!block && !bodyHit) list.push(d);
+            }
+          }
+          return list;
+        }
+
+        function bfsGoal(grid, start, goal, occupied) {
+          const queue = [start];
+          const visited = new Set([keyOf(start.x, start.y)]);
+          const prev = new Map();
+          while (queue.length) {
+            const cur = queue.shift();
+            if (cur.x === goal.x && cur.y === goal.y) break;
+            for (const d of [{ x: 1, y: 0 }, { x: -1, y: 0 }, { x: 0, y: 1 }, { x: 0, y: -1 }]) {
+              const nx = cur.x + d.x;
+              const ny = cur.y + d.y;
+              if (nx < 0 || nx >= CONFIG.COLS || ny < 0 || ny >= CONFIG.ROWS) continue;
+              const k = keyOf(nx, ny);
+              if (visited.has(k)) continue;
+              const blocked = occupied.has(k) || (grid && grid[k]);
+              if (blocked) continue;
+              visited.add(k);
+              prev.set(k, cur);
+              queue.push({ x: nx, y: ny });
+            }
+          }
+          const path = [];
+          let cur = goal;
+          const gk = keyOf(goal.x, goal.y);
+          if (!visited.has(gk)) return [];
+          while (cur && !(cur.x === start.x && cur.y === start.y)) {
+            path.push(cur);
+            const p = prev.get(keyOf(cur.x, cur.y));
+            if (!p) break;
+            cur = p;
+          }
+          path.reverse();
+          return path;
+        }
+
+        function findNearestApple(rival, apples, occupiedSet) {
+          let best = null;
+          let bestDist = Number.POSITIVE_INFINITY;
+          for (const apple of apples) {
+            const d = Math.abs(apple.x - rival.head().x) + Math.abs(apple.y - rival.head().y);
+            if (d < bestDist) {
+              bestDist = d;
+              best = apple;
+            }
+          }
+          return best;
+        }
+
+        function simulateBoard(level, snake, target, hazardMap, rivals, appleSet) {
+          const blocked = new Set();
+          for (let x = 0; x < CONFIG.COLS; x++) {
+            for (let y = 0; y < CONFIG.ROWS; y++) {
+              if (level.wallMap && level.wallMap[x] && level.wallMap[x][y]) blocked.add(keyOf(x, y));
+            }
+          }
+          for (const rival of rivals) {
+            if (!rival || rival === snake || !rival.alive) continue;
+            for (const seg of rival.body) blocked.add(keyOf(seg.x, seg.y));
+          }
+          for (const seg of snake.body) blocked.add(keyOf(seg.x, seg.y));
+          return { blocked };
+        }
+
+        function chooseBestDirection(rival, level, snakes, apples, player, game) {
+          const head = rival.head();
+          const options = getAvailableDirections(level, rival, new Set());
+          if (!options.length) return rival.direction;
+          const occupied = new Set();
+          for (const s of snakes) {
+            if (s && s.alive) s.body.forEach(seg => occupied.add(keyOf(seg.x, seg.y)));
+          }
+          let bestDir = rival.direction;
+          let bestScore = -Infinity;
+
+          for (const dir of options) {
+            const nx = head.x + dir.x;
+            const ny = head.y + dir.y;
+            let score = 0;
+            if (level.wrapEdges) {
+              score += 0.2;
+            }
+            const nextKey = keyOf((nx + CONFIG.COLS) % CONFIG.COLS, (ny + CONFIG.ROWS) % CONFIG.ROWS);
+            if (apples.some(a => a.x === nx && a.y === ny)) score += 12;
+            if (player && player.head()) {
+              const distToPlayer = Math.abs((player.head().x) - nx) + Math.abs((player.head().y) - ny);
+              if (rival.strategy === 'VIPER') score += 10 - distToPlayer * 0.4;
+            }
+            const cellCount = floodFill(level, nx, ny, occupied, rival.body.length + 4);
+            score += cellCount * 0.8;
+            score += Math.random() * 0.5;
+            if (score > bestScore) {
+              bestScore = score;
+              bestDir = dir.name;
+            }
+          }
+
+          return bestDir;
+        }
+
+        function floodFill(level, sx, sy, occupiedSet, minReach) {
+          const q = [{ x: sx, y: sy }];
+          const seen = new Set([keyOf(sx, sy)]);
+          let count = 0;
+          while (q.length) {
+            const n = q.shift();
+            count++;
+            for (const d of [{ x: 1, y: 0 }, { x: -1, y: 0 }, { x: 0, y: 1 }, { x: 0, y: -1 }]) {
+              let nx = n.x + d.x;
+              let ny = n.y + d.y;
+              if (level.wrapEdges) {
+                nx = (nx + CONFIG.COLS) % CONFIG.COLS;
+                ny = (ny + CONFIG.ROWS) % CONFIG.ROWS;
+              }
+              if (nx < 0 || nx >= CONFIG.COLS || ny < 0 || ny >= CONFIG.ROWS) continue;
+              const k = keyOf(nx, ny);
+              if (seen.has(k)) continue;
+              // wall check
+              if (level.wallMap && level.wallMap[nx] && level.wallMap[nx][ny]) continue;
+              if (occupiedSet.has(k)) continue;
+              seen.add(k);
+              q.push({ x: nx, y: ny });
+            }
+          }
+          return count;
+        }
+
+        function think(level, rival, apples, player, rivalList, tick) {
+          if (!rival.alive) {
+            if (rival.respawnTimer > 0) rival.respawnTimer -= 1;
+            return;
+          }
+
+          const head = rival.head();
+          if (!head) return;
+
+          if (rival.strategy === 'PHANTOM' && Math.random() < 0.012) {
+            rival.teleportTimer = 3;
+          }
+
+          const suitable = apples.length ? apples : [];
+          let action = null;
+          const dirs = [
+            { name: 'left', x: -1, y: 0 },
+            { name: 'right', x: 1, y: 0 },
+            { name: 'up', x: 0, y: -1 },
+            { name: 'down', x: 0, y: 1 }
+          ];
+
+          if (rival.strategy === 'VIPER') {
+            const pHead = player.head();
+            if (pHead) {
+              const predX = pHead.x + (player.direction === 'left' ? -4 : player.direction === 'right' ? 4 : 0);
+              const predY = pHead.y + (player.direction === 'up' ? -4 : player.direction === 'down' ? 4 : 0);
+              let target = { x: predX, y: predY };
+              if (level.wrapEdges) {
+                target.x = (target.x + CONFIG.COLS) % CONFIG.COLS;
+                target.y = (target.y + CONFIG.ROWS) % CONFIG.ROWS;
+              }
+              let best = null;
+              let bestScore = -Infinity;
+              for (const d of dirs) {
+                const nx = head.x + d.x; const ny = head.y + d.y;
+                if (level.wrapEdges) {
+                  const wx = (nx + CONFIG.COLS) % CONFIG.COLS;
+                  const wy = (ny + CONFIG.ROWS) % CONFIG.ROWS;
+                  if (wx < 0 || wx >= CONFIG.COLS || wy < 0 || wy >= CONFIG.ROWS) continue;
+                }
+                const blocked = rivalList.some(r => r !== rival && r.alive && r.body.some(seg => seg.x === nx && seg.y === ny));
+                if (blocked) continue;
+                const score = Math.abs(nx - target.x) + Math.abs(ny - target.y) + Math.random() * 0.5;
+                if (score > bestScore) {
+                  bestScore = score;
+                  best = d.name;
+                }
+              }
+              if (best) action = best;
+            }
+          }
+
+          if (rival.strategy === 'GRUB') {
+            const apple = apples.reduce((best, a) => {
+              const d = Math.abs(a.x - head.x) + Math.abs(a.y - head.y);
+              if (!best || d < best.dist) return { dist: d, apple: a };
+              return best;
+            }, null);
+            if (apple && apple.apple) {
+              const dx = apple.apple.x - head.x;
+              const dy = apple.apple.y - head.y;
+              const next = dx === 0 ? (dy < 0 ? 'up' : 'down') : (dx < 0 ? 'left' : 'right');
+              action = next;
+            }
+          }
+
+          if (rival.strategy === 'PHANTOM') {
+            const apple = apples.reduce((best, a) => {
+              const d = Math.abs(a.x - head.x) + Math.abs(a.y - head.y);
+              if (!best || d < best.dist) return { dist: d, apple: a };
+              return best;
+            }, null);
+            if (apple) action = (apple.apple.x > head.x ? 'right' : apple.apple.x < head.x ? 'left' : apple.apple.y > head.y ? 'down' : 'up');
+          }
+
+          if (rival.strategy === 'ECHO') {
+            let mirror = null;
+            if (player.queuedDirs.length) {
+              mirror = player.queuedDirs[0] || player.direction;
+            }
+            if (mirror) action = mirror;
+          }
+
+          if (rival.strategy === 'TITAN') {
+            action = chooseBestDirection(rival, level, rivalList, apples, player, game);
+          }
+
+          if (!action) {
+            const dirs = [
+              { name: 'left', x: -1, y: 0 },
+              { name: 'right', x: 1, y: 0 },
+              { name: 'up', x: 0, y: -1 },
+              { name: 'down', x: 0, y: 1 }
+            ];
+            let best = null;
+            let bestScore = -Infinity;
+            for (const d of dirs) {
+              const nx = head.x + d.x;
+              const ny = head.y + d.y;
+              if (level.wrapEdges) {
+                const wx = (nx + CONFIG.COLS) % CONFIG.COLS;
+                const wy = (ny + CONFIG.ROWS) % CONFIG.ROWS;
+                if (wx < 0 || wx >= CONFIG.COLS || wy < 0 || wy >= CONFIG.ROWS) continue;
+              }
+              const blocked = rivalList.some(r => r !== rival && r.alive && r.body.some(seg => seg.x === nx && seg.y === ny));
+              if (blocked) continue;
+              const score = Math.random() * 10 + (apples.some(a => a.x === nx && a.y === ny) ? 8 : 0);
+              if (score > bestScore) {
+                bestScore = score;
+                best = d.name;
+              }
+            }
+            if (best) action = best;
+          }
+
+          if (action) rival.queueDirection(action);
+        }
+
+        return { makeRival, think };
+      })();
+
+      const Levels = (() => {
+        const levelDefs = [
+          { id: 1, name: 'The First Bite', tick: 150, applesToClear: 5, wallType: 'open', rivals: [], story: 'You wake in the Garden. The fruit remembers your name.', wrap: false, description: 'None. Teach movement + eating.' },
+          { id: 2, name: 'Hedgerow', tick: 140, applesToClear: 6, wallType: 'pillars', rivals: [], story: 'The Garden keeps its shape. Learn it or bruise against it.', wrap: false, description: '4 inner pillars' },
+          { id: 3, name: 'Wrapped', tick: 135, applesToClear: 7, wallType: 'wrapped', rivals: [], story: 'The fence has no ends. Neither does hunger.', wrap: true, description: 'Wrap-around edges; no wall death.' },
+          { id: 4, name: 'The Rival Arrives', tick: 130, applesToClear: 6, wallType: 'open', rivals: ['VIPER'], story: 'Something else is hungry. It learned by watching you.', wrap: false, description: 'First rival: cuts you off.' },
+          { id: 5, name: 'Narrow Paths', tick: 125, applesToClear: 8, wallType: 'maze', rivals: [], story: 'The Garden narrows where it is afraid.', wrap: false, description: 'Maze corridors' },
+          { id: 6, name: 'The Hoarder', tick: 120, applesToClear: 7, wallType: 'blocks', rivals: ['GRUB'], story: 'It does not eat to live. It lives to take.', wrap: false, description: 'Rival rushes apples.' },
+          { id: 7, name: 'Ghost in the Wire', tick: 115, applesToClear: 8, wallType: 'wire', rivals: ['PHANTOM'], story: 'The dead protocol never stopped running.', wrap: false, description: 'Ghost rival passes through walls.' },
+          { id: 8, name: 'Speed Garden', tick: 95, applesToClear: 9, wallType: 'open', rivals: ['VIPER'], story: 'Grow fast. The Garden is counting down.', wrap: false, description: 'High speed, double apples.' },
+          { id: 9, name: 'Mirror Twin', tick: 115, applesToClear: 8, wallType: 'symmetric', rivals: ['ECHO'], story: 'It has your shape. It does not have your reasons.', wrap: false, description: 'Rival mirrors inputs.' },
+          { id: 10, name: 'The Orchard Siege', tick: 105, applesToClear: 10, wallType: 'siege', rivals: ['GRUB', 'PHANTOM'], story: 'They came together. They are not allies.', wrap: false, description: 'Two rivals at once.' },
+          { id: 11, name: 'Titan\'s Coil', tick: 100, applesToClear: 10, wallType: 'ring', rivals: ['TITAN'], story: 'The first serpent. It has eaten every apple you were promised.', wrap: true, description: 'Boss snake, ring arena.' },
+          { id: 12, name: 'The Last Apple', tick: 75, applesToClear: 6, wallType: 'small', rivals: ['TITAN', 'VIPER', 'ECHO'], story: 'One fruit left. Take it and the Garden forgets you. Refuse and it remembers forever.', wrap: true, description: 'All-out finale with golden apple.' }
+        ];
+
+        function wallMapFor(level) {
+          const map = {};
+          const add = (x, y) => {
+            if (!map[x]) map[x] = {};
+            map[x][y] = true;
+          };
+          const C = CONFIG.COLS;
+          const R = CONFIG.ROWS;
+
+          if (level.wallType === 'open') return map;
+          if (level.wallType === 'pillars') {
+            const centers = [{x: 8,y: 8},{x: 15,y: 8},{x: 8,y: 15},{x: 15,y: 15}];
+            for (const p of centers) {
+              for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) add(p.x + dx, p.y + dy);
+            }
+            return map;
+          }
+          if (level.wallType === 'wrapped') return map;
+          if (level.wallType === 'maze') {
+            const walls = [
+              [6, 4, 6, 18], [17, 4, 17, 18], [4, 6, 19, 6], [4, 17, 19, 17],
+              [9, 9, 15, 9], [9, 14, 15, 14], [12, 9, 12, 14]
+            ];
+            for (const [x1, y1, x2, y2] of walls) {
+              const xMin = Math.min(x1, x2), xMax = Math.max(x1, x2);
+              const yMin = Math.min(y1, y2), yMax = Math.max(y1, y2);
+              for (let x = xMin; x <= xMax; x++) for (let y = yMin; y <= yMax; y++) add(x, y);
+            }
+            return map;
+          }
+          if (level.wallType === 'blocks') {
+            const coords = [[5,5],[9,8],[13,12],[18,10],[18,17],[8,18],[12,19],[5,16]];
+            for (const [x, y] of coords) add(x, y);
+            return map;
+          }
+          if (level.wallType === 'wire') {
+            const coords = [[4,4],[6,4],[18,4],[20,4],[4,19],[6,19],[18,19],[20,19],[10,10],[10,13],[13,10],[13,13],[5,11],[18,11],[5,12],[18,12]];
+            for (const [x, y] of coords) add(x, y);
+            return map;
+          }
+          if (level.wallType === 'symmetric') {
+            const coords = [[8,5],[15,5],[11,8],[12,8],[8,18],[15,18],[11,15],[12,15],[6,10],[17,10],[6,13],[17,13]];
+            for (const [x, y] of coords) add(x, y);
+            return map;
+          }
+          if (level.wallType === 'siege') {
+            const coords = [[6,6],[6,11],[6,16],[10,8],[14,8],[18,6],[18,11],[18,16],[10,15],[14,15],[11,11],[12,11]];
+            for (const [x, y] of coords) add(x, y);
+            return map;
+          }
+          if (level.wallType === 'ring') {
+            for (let x = 0; x < C; x++) for (let y = 0; y < R; y++) {
+              if (((x === 0 || x === C-1 || y === 0 || y === R-1) && (x > 3 && x < C - 4 && y > 3 && y < R - 4)) || (x === 11 || x ===12 || y ===11 || y===12)) {
+                add(x, y);
+              }
+            }
+            return map;
+          }
+          if (level.wallType === 'small') {
+            for (let x = 4; x < C-4; x++) for (let y = 4; y < R-4; y++) {
+              if ((x === 4 || x === C-5 || y === 4 || y === R-5) && !((x >= 8 && x <= 15) && (y >= 8 && y <= 15))) add(x, y);
+            }
+            return map;
+          }
+          return map;
+        }
+
+        function getLevel(number) {
+          const def = levelDefs[number - 1] || levelDefs[0];
+          return {
+            ...def,
+            wallMap: wallMapFor(def),
+            appleCount: def.id === 8 || def.id === 10 || def.id === 12 ? 2 + (def.id === 12 ? 1 : 0) : 1,
+            wrapEdges: def.wrap,
+            status: 'ready'
+          };
+        }
+
+        return { list: levelDefs, getLevel };
+      })();
+
+      const Game = (() => {
+        const stateQueue = ['BOOT', 'TITLE', 'INTRO', 'PLAY', 'PAUSE', 'DEAD', 'CLEAR', 'ENDING', 'LEVEL_SELECT', 'OPTIONS', 'LORE'];
+        const state = { current: 'BOOT' };
+        let bootStart = 0;
+        let introIndex = 0;
+        let storyChars = 0;
+        let storyTimer = 0;
+        let lastFrameTime = 0;
+        let accum = 0;
+        let fadeTimer = 0;
+        let musicTimer = 0;
+        let timerStarted = false;
+        let levelIndex = 1;
+        let currentLevel = null;
+        let gameWorld = {
+          snakes: [],
+          player: null,
+          apples: [],
+          goldenApple: null,
+          lastComboAt: 0,
+          comboLevel: 1,
+          comboTimer: 0,
+          applesEaten: 0,
+          score: 0,
+          bestScore: 0,
+          clearCount: 0,
+          deathCount: 0,
+          diff: 'normal',
+          levelStartTime: 0,
+          lastTickTime: 0,
+          message: '',
+          messageTimer: 0,
+          particles: [],
+          screenShake: 0,
+          deathReason: null,
+          statusText: '',
+          levelCleared: false,
+          rivalKills: 0,
+          messageHistory: [],
+          whisperText: '',
+          whisperTimer: 0,
+          bgFlash: 0,
+          goldenSlowTimer: 0,
+          loaded: false,
+          pauseMenuIndex: 0,
+          optionsMenuIndex: 0,
+          titleMenuIndex: 0
+        };
+
+        function persistProgress() {
+          SAVE = STORAGE.get();
+          STORAGE.save(SAVE);
+        }
+
+        function setState(nextState) {
+          state.current = nextState;
+          if (nextState === 'BOOT') bootStart = performance.now();
+          if (nextState === 'TITLE') {
+            gameWorld.titleMenuIndex = 0;
+            gameWorld.message = 'PRESS SPACE';
+          }
+          if (nextState === 'INTRO') {
+            const def = Levels.getLevel(levelIndex);
+            gameWorld.storyText = def.story;
+            gameWorld.storyChars = 0;
+            gameWorld.storyTimer = 0;
+            storyIndex = 0;
+          }
+          if (nextState === 'PLAY') {
+            gameWorld.levelStartTime = performance.now();
+            gameWorld.lastTickTime = performance.now();
+            gameWorld.message = '';
+            if (currentLevel && currentLevel.id > 1) Audio.setAct(Math.min(12, currentLevel.id));
+          }
+          if (nextState === 'DEAD') {
+            gameWorld.message = 'DEAD';
+            gameWorld.messageTimer = 5;
+            if (SAVE.settings.hold) {}
+          }
+          if (nextState === 'CLEAR') {
+            Audio.play('levelClear');
+          }
+          if (nextState === 'ENDING') {
+            gameWorld.message = 'GARDEN STATE';
+          }
+        }
+
+        function titleMenuChoices() {
+          return ['START CAMPAIGN', 'LEVEL SELECT', 'LORE', 'OPTIONS'];
+        }
+
+        function makePlayer(level) {
+          const start = { x: 3, y: 12 };
+          const snake = makeSnake({ x: start.x, y: start.y, dir: 'right', color: COLORS.bright, name: 'YOU', rival: false, palette: [COLORS.light, COLORS.bright] });
+          snake.body = [{x:3,y:12},{x:2,y:12},{x:1,y:12}];
+          return snake;
+        }
+
+        function setupLevel(levelNo = levelIndex) {
+          const levelInfo = Levels.getLevel(levelNo);
+          currentLevel = levelInfo;
+          const player = makePlayer(levelInfo);
+          gameWorld.player = player;
+          gameWorld.apples = [];
+          gameWorld.goldenApple = null;
+          gameWorld.comboLevel = 1;
+          gameWorld.comboTimer = 0;
+          gameWorld.applesEaten = 0;
+          gameWorld.levelCleared = false;
+          gameWorld.rivalKills = 0;
+          gameWorld.deathReason = null;
+          gameWorld.messageHistory = gameWorld.messageHistory || [];
+          gameWorld.whisperText = '';
+          gameWorld.whisperTimer = 0;
+          gameWorld.screenShake = 0;
+          gameWorld.goldenSlowTimer = 0;
+          const applesToSpawn = Math.max(1, levelInfo.appleCount || 1);
+          for (let i = 0; i < applesToSpawn; i++) spawnApple(true);
+
+          gameWorld.snakes = [player];
+          const rivalsList = Array.isArray(levelInfo.rivals) ? levelInfo.rivals : [];
+          for (const name of rivalsList) {
+            const spawn = { x: 21, y: 12 + (gameWorld.snakes.length * 2) };
+            const rival = Rival.makeRival(name, name, spawn.x, spawn.y, levelInfo);
+            rival.body = [{x:spawn.x,y:spawn.y},{x:spawn.x-1,y:spawn.y},{x:spawn.x-2,y:spawn.y}];
+            rival.direction = 'left';
+            rival.alive = true;
+            gameWorld.snakes.push(rival);
+          }
+        }
+
+        function spawnApple(allowGolden = true) {
+          const occupied = [];
+          for (const snake of gameWorld.snakes) {
+            if (snake && snake.alive) occupied.push(snake.body);
+          }
+          const appleList = gameWorld.apples.map(a => ({x: a.x, y: a.y}));
+          const free = { x: 0, y: 0 };
+          let cell = null;
+          for (let i = 0; i < 500; i++) {
+            const x = Math.floor(Math.random() * CONFIG.COLS);
+            const y = Math.floor(Math.random() * CONFIG.ROWS);
+            const blocked = !!(currentLevel && currentLevel.wallMap && currentLevel.wallMap[x] && currentLevel.wallMap[x][y]);
+            const inSnake = gameWorld.snakes.some(s => s && s.alive && s.body.some(seg => seg.x === x && seg.y === y));
+            const isApple = appleList.some(a => a.x === x && a.y === y);
+            if (!blocked && !inSnake && !isApple) {
+              cell = { x, y };
+              break;
+            }
+          }
+          if (!cell) cell = { x: 1, y: 1 };
+          const apple = { x: cell.x, y: cell.y, golden: false, pulse: Math.random() * Math.PI * 2, grow: 0 };
+          if (allowGolden && Math.random() < CONFIG.goldenChance) {
+            apple.golden = true;
+            apple.value = 5;
+            apple.spawnedAt = performance.now();
+            gameWorld.goldenApple = apple;
+          }
+          gameWorld.apples.push(apple);
+          return apple;
+        }
+
+        function handleApplePickup(apple) {
+          const i = gameWorld.apples.indexOf(apple);
+          if (i >= 0) gameWorld.apples.splice(i, 1);
+          if (apple.golden) {
+            gameWorld.goldenSlowTimer = 5000;
+            gameWorld.whisperText = 'SOMETHING NOTICED.';
+            gameWorld.whisperTimer = 5;
+            Audio.play('golden');
+          }
+          const comboWindow = CONFIG.comboWindow;
+          const now = performance.now();
+          const timeSince = now - gameWorld.lastComboAt;
+          if (timeSince <= comboWindow) {
+            gameWorld.comboLevel = Math.min(CONFIG.maxCombo, gameWorld.comboLevel + 1);
+          } else {
+            gameWorld.comboLevel = 1;
+          }
+          gameWorld.lastComboAt = now;
+          gameWorld.comboTimer = comboWindow;
+          if (gameWorld.comboLevel >= 4) {
+            gameWorld.whisperText = 'YOU ARE GETTING GOOD AT THIS. THAT IS THE PROBLEM.';
+            gameWorld.whisperTimer = 5;
+          }
+          gameWorld.score += Math.round((apple.golden ? 5 : 1) * 10 * gameWorld.comboLevel);
+          gameWorld.applesEaten += 1;
+          const effectColor = apple.golden ? '#d8a13a' : '#9bbc0f';
+          createBurst(apple.x, apple.y, effectColor, apple.golden ? 20 : 12, apple.golden ? 4 : 3);
+          gameWorld.player.grow(CONFIG.growthPerApple);
+          gameWorld.player.glow = 1;
+          gameWorld.screenShake = 12;
+          Audio.play('chomp', { gain: 0.23 + gameWorld.comboLevel * 0.03, freqStart: 220, freqEnd: 420 + gameWorld.comboLevel * 50 });
+          spawnApple(false);
+          if (gameWorld.applesEaten >= currentLevel.applesToClear) {
+            setState('CLEAR');
+          }
+        }
+
+        function createBurst(x, y, color, count, force = 2) {
+          for (let i = 0; i < count; i++) {
+            const angle = Math.random() * Math.PI * 2;
+            const speed = rand(0.4, 1.4) * force;
+            gameWorld.particles.push({
+              x: x + 0.5,
+              y: y + 0.5,
+              vx: Math.cos(angle) * speed,
+              vy: Math.sin(angle) * speed,
+              size: rand(1.5, 4),
+              life: 1,
+              maxLife: rand(28, 58),
+              color
+            });
+          }
+        }
+
+        function deathBy(cause) {
+          if (state.current === 'DEAD') return;
+          gameWorld.deathReason = cause;
+          gameWorld.player.alive = false;
+          gameWorld.player.deathCause = cause;
+          createBurst(gameWorld.player.head().x + 0.5, gameWorld.player.head().y + 0.5, '#d94b4b', 30, 3.5);
+          gameWorld.screenShake = 18;
+          Audio.play('death', { gain: 0.2 });
+          if (cause === 'Rival') {
+            gameWorld.whisperText = 'IT WAS BUILT TO DO EXACTLY THAT.';
+            gameWorld.whisperTimer = 4;
+          } else if (cause === 'Wall') {
+            gameWorld.whisperText = 'THE GARDEN REMEMBERS THAT ONE.';
+            gameWorld.whisperTimer = 4;
+          }
+          setState('DEAD');
+        }
+
+        function updatePlayer(dt) {
+          const p = gameWorld.player;
+          if (!p || !p.alive) return;
+          const levelInfo = currentLevel;
+          const result = p.step(levelInfo, { rivals: gameWorld.snakes.filter(s => s && s !== p && s.alive) });
+          if (result.dead) {
+            deathBy(result.cause || 'Wall');
+            return;
+          }
+          for (const apple of gameWorld.apples) {
+            if (p.body.some(seg => seg.x === apple.x && seg.y === apple.y)) handleApplePickup(apple);
+          }
+
+          const golden = gameWorld.goldenApple;
+          if (golden && p.body.some(seg => seg.x === golden.x && seg.y === golden.y)) {
+            handleApplePickup(golden);
+          }
+
+          if (gameWorld.comboTimer > 0) gameWorld.comboTimer -= dt * 1000;
+          if (gameWorld.comboTimer <= 0) gameWorld.comboLevel = 1;
+
+          if (gameWorld.goldenSlowTimer > 0) {
+            gameWorld.goldenSlowTimer -= dt * 1000;
+            // slow motion effect is implemented through tick multiplier in update loop
+          }
+        }
+
+        function updateRivals(dt) {
+          for (let i = 1; i < gameWorld.snakes.length; i++) {
+            const rival = gameWorld.snakes[i];
+            if (!rival || !rival.alive) continue;
+            Rival.think(currentLevel, rival, gameWorld.apples, gameWorld.player, gameWorld.snakes, performance.now());
+            const result = rival.step(currentLevel, { rivals: gameWorld.snakes.filter(s => s && s !== rival && s.alive) });
+            if (result.dead) {
+              rival.alive = false;
+              const cause = result.cause || 'Wall';
+              if (rival.typeName === 'TITAN') {
+                // Titan cannot die in non-12 levels, but still won't kill itself
+                rival.alive = true;
+                rival.grow(1);
+                continue;
+              }
+              const down = { name: rival.name, len: rival.length() };
+              createBurst(rival.head().x + 0.5, rival.head().y + 0.5, '#d8a13a', 18, 2.4);
+              Audio.play('rivalDown');
+              if (gameWorld.player && gameWorld.player.alive) {
+                gameWorld.score += 100;
+              }
+              if (rival.body.some(seg => seg.x === gameWorld.player.head().x && seg.y === gameWorld.player.head().y)) {
+                deathBy('Rival');
+              }
+            }
+            for (const apple of gameWorld.apples) {
+              if (rival.body.some(seg => seg.x === apple.x && seg.y === apple.y)) {
+                rival.grow(CONFIG.growthPerApple);
+                const idx = gameWorld.apples.indexOf(apple);
+                if (idx >= 0) gameWorld.apples.splice(idx, 1);
+                spawnApple(false);
+              }
+            }
+          }
+        }
+
+        function processMenuInput() {
+          if (state.current === 'TITLE') {
+            if (Game.menu === 'title') {
+              // handled by key events
+            }
+          }
+        }
+
+        function advanceIntro() {
+          setState('PLAY');
+        }
+
+        function togglePause() {
+          if (state.current === 'PLAY') setState('PAUSE');
+          else if (state.current === 'PAUSE') setState('PLAY');
+        }
+
+        function confirmTitle() {
+          if (state.current === 'TITLE') {
+            const choice = ['START CAMPAIGN', 'LEVEL SELECT', 'LORE', 'OPTIONS'][gameWorld.titleMenuIndex || 0];
+            if (choice === 'START CAMPAIGN') {
+              levelIndex = 1;
+              setupLevel(levelIndex);
+              setState('INTRO');
+            } else if (choice === 'LEVEL SELECT') {
+              setState('LEVEL_SELECT');
+            } else if (choice === 'LORE') {
+              setState('LORE');
+            } else if (choice === 'OPTIONS') {
+              setState('OPTIONS');
+            }
+          }
+        }
+
+        function openLore() {
+          setState('LORE');
+        }
+
+        function closeLore() {
+          setState('TITLE');
+        }
+
+        function retryLevel() {
+          setupLevel(levelIndex);
+          setState('PLAY');
+        }
+
+        function continueToNextLevel() {
+          if (levelIndex >= 12) {
+            setState('ENDING');
+          } else {
+            levelIndex += 1;
+            setupLevel(levelIndex);
+            setState('INTRO');
+          }
+        }
+
+        function nextTitleOption(delta) {
+          const choices = titleMenuChoices();
+          gameWorld.titleMenuIndex = (gameWorld.titleMenuIndex + delta + choices.length) % choices.length;
+          Audio.play('menuMove');
+        }
+
+        function advanceEnding() {
+          setState('TITLE');
+        }
+
+        function update(dt) {
+          const now = performance.now();
+          if (state.current === 'BOOT') {
+            if (now - bootStart > 1500) setState('TITLE');
+          } else if (state.current === 'TITLE') {
+            // menu hover only
+          } else if (state.current === 'INTRO') {
+            gameWorld.storyTimer += dt * 1000;
+            if (gameWorld.storyTimer > 28) {
+              gameWorld.storyTimer = 0;
+              gameWorld.storyChars = Math.min((gameWorld.storyChars || 0) + 1, (gameWorld.storyText || '').length);
+            }
+          } else if (state.current === 'PLAY') {
+            const beat = Math.max(30, currentLevel ? currentLevel.tick : 150);
+            if (gameWorld.goldenSlowTimer > 0) {
+              accum += dt * 1000 * 1.6;
+            } else {
+              accum += dt * 1000;
+            }
+            while (accum >= beat) {
+              accum -= beat;
+              updatePlayer(dt);
+              updateRivals(dt);
+            }
+            if (gameWorld.whisperTimer > 0) gameWorld.whisperTimer -= dt;
+            if (gameWorld.comboTimer > 0) gameWorld.comboTimer -= dt * 1000;
+            if (gameWorld.comboTimer <= 0) gameWorld.comboLevel = 1;
+            for (let i = gameWorld.particles.length - 1; i >= 0; i--) {
+              const p = gameWorld.particles[i];
+              p.x += p.vx * dt * 60;
+              p.y += p.vy * dt * 60;
+              p.life -= dt * 0.8;
+              if (p.life <= 0) gameWorld.particles.splice(i, 1);
+            }
+            if (gameWorld.screenShake > 0) gameWorld.screenShake *= 0.9;
+          } else if (state.current === 'CLEAR') {
+            if (gameWorld.whisperTimer > 0) gameWorld.whisperTimer -= dt;
+          } else if (state.current === 'DEAD') {
+            if (gameWorld.shake) gameWorld.screenShake *= 0.9;
+          }
+        }
+
+        function renderBoot() {
+          const fade = clamp((performance.now() - bootStart) / 1500, 0, 1);
+          ctx.fillStyle = '#040b06';
+          ctx.fillRect(0,0,canvas.width,canvas.height);
+          ctx.fillStyle = '#9bbc0f';
+          ctx.font = '22px monospace';
+          ctx.fillText('EDEN v0.9', 50, 120);
+          ctx.fillText('MEMORY 62%', 50, 165);
+          ctx.fillText('SNAKES: 5', 50, 210);
+          ctx.fillText('OK', 50, 255);
+        }
+
+        function renderTitle() {
+          ctx.fillStyle = '#0f380f';
+          ctx.fillRect(0,0,canvas.width,canvas.height);
+          ctx.fillStyle = '#9bbc0f';
+          ctx.font = 'bold 28px monospace';
+          ctx.fillText('SERPENT PROTOCOL', 240, 120);
+          ctx.font = '18px monospace';
+          ctx.fillText('GARDEN OF EDEN', 290, 160);
+          const menu = titleMenuChoices();
+          for (let i = 0; i < menu.length; i++) {
+            const y = 260 + i * 46;
+            const selected = i === gameWorld.titleMenuIndex;
+            ctx.fillStyle = selected ? '#e8f0d8' : '#9bbc0f';
+            ctx.fillText(menu[i], 240, y);
+            if (selected) {
+              ctx.fillStyle = '#9bbc0f';
+              ctx.fillRect(210, y - 18, 12, 12);
+            }
+          }
+          ctx.fillStyle = '#8bac0f';
+          ctx.fillText('PRESS SPACE', 300, 530);
+          if (Math.sin(performance.now() * 0.008) > 0) ctx.fillStyle = '#e8f0d8';
+          ctx.fillText('>', 250, 260 + gameWorld.titleMenuIndex * 46);
+        }
+
+        function renderIntro() {
+          const def = currentLevel || Levels.getLevel(levelIndex);
+          ctx.fillStyle = '#0f380f';
+          ctx.fillRect(0,0,canvas.width,canvas.height);
+          ctx.fillStyle = '#e8f0d8';
+          ctx.font = 'bold 20px monospace';
+          ctx.fillText('LEVEL ' + def.id, 100, 130);
+          ctx.fillText(def.name.toUpperCase(), 100, 170);
+          ctx.fillStyle = '#9bbc0f';
+          ctx.fillText('SPEED', 100, 220);
+          const speedRatio = 1 - ((def.tick - 75) / 90);
+          ctx.fillStyle = '#306230';
+          ctx.fillRect(190, 200, 220, 18);
+          ctx.fillStyle = '#9bbc0f';
+          ctx.fillRect(190, 200, 220 * speedRatio, 18);
+          ctx.fillStyle = '#e8f0d8';
+          ctx.font = '16px monospace';
+          ctx.fillText('HAZARD: ' + (def.description || 'NONE'), 100, 270);
+          ctx.fillText('RIVALS: ' + (def.rivals.length ? def.rivals.join(' ') : 'NONE'), 100, 305);
+          const story = def.story || '';
+          const visible = story.slice(0, gameWorld.storyChars || 0);
+          ctx.fillText(visible, 100, 370, 640);
+          ctx.fillStyle = '#9bbc0f';
+          ctx.fillText('PRESS SPACE', 315, 470);
+          if (gameWorld.deathCount > 0) ctx.fillText('DEATHS: ' + gameWorld.deathCount, 100, 420);
+        }
+
+        function renderGame() {
+          ctx.save();
+          const shakeX = gameWorld.screenShake ? (Math.random() - 0.5) * gameWorld.screenShake : 0;
+          const shakeY = gameWorld.screenShake ? (Math.random() - 0.5) * gameWorld.screenShake : 0;
+          ctx.translate(shakeX, shakeY);
+
+          ctx.fillStyle = '#0f380f';
+          ctx.fillRect(0,0,canvas.width,canvas.height);
+
+          ctx.strokeStyle = '#306230';
+          ctx.lineWidth = 2;
+          ctx.strokeRect(20, 70, 500, 500);
+
+          // grid
+          ctx.fillStyle = '#1a4d1a';
+          for (let x = 0; x < CONFIG.COLS; x++) {
+            for (let y = 0; y < CONFIG.ROWS; y++) {
+              const px = CONFIG.PLAY_X + x * CONFIG.CELL;
+              const py = CONFIG.PLAY_Y + y * CONFIG.CELL;
+              if ((x + y) % 2 === 0) ctx.fillRect(px + 4, py + 4, 2, 2);
+            }
+          }
+
+          // walls
+          const wallMap = currentLevel ? currentLevel.wallMap : {};
+          for (const xKey in wallMap) {
+            for (const yKey in wallMap[xKey]) {
+              const x = Number(xKey), y = Number(yKey);
+              ctx.fillStyle = '#306230';
+              const px = CONFIG.PLAY_X + x * CONFIG.CELL;
+              const py = CONFIG.PLAY_Y + y * CONFIG.CELL;
+              ctx.fillRect(px + 1, py + 1, CONFIG.CELL - 2, CONFIG.CELL - 2);
+            }
+          }
+
+          // apples
+          for (const apple of gameWorld.apples) {
+            const px = CONFIG.PLAY_X + apple.x * CONFIG.CELL + CONFIG.CELL / 2;
+            const py = CONFIG.PLAY_Y + apple.y * CONFIG.CELL + CONFIG.CELL / 2;
+            const pulse = 1 + Math.sin((performance.now() * 0.015) + apple.pulse) * 0.14;
+            ctx.save();
+            ctx.translate(px, py);
+            ctx.scale(pulse, pulse);
+            ctx.fillStyle = apple.golden ? '#d8a13a' : '#9bbc0f';
+            ctx.beginPath();
+            ctx.arc(0, 0, apple.golden ? 7 : 5, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.fillStyle = apple.golden ? '#f0d17a' : '#dfeec9';
+            ctx.fillRect(-1, -3, 2, 6);
+            ctx.restore();
+          }
+
+          // snakes
+          for (const snake of gameWorld.snakes) {
+            if (!snake || !snake.alive) continue;
+            const palette = snake.palette || [COLORS.light, COLORS.bright];
+            for (let i = 0; i < snake.body.length; i++) {
+              const seg = snake.body[i];
+              const px = CONFIG.PLAY_X + seg.x * CONFIG.CELL;
+              const py = CONFIG.PLAY_Y + seg.y * CONFIG.CELL;
+              const c = i === 0 ? palette[1] : (i % 2 === 0 ? palette[0] : palette[1]);
+              ctx.fillStyle = c;
+              ctx.fillRect(px + 1, py + 1, CONFIG.CELL - 2, CONFIG.CELL - 2);
+              if (i === 0) {
+                ctx.fillStyle = '#e8f0d8';
+                const dir = snake.direction;
+                const eyeX = dir === 'left' ? px + 4 : dir === 'right' ? px + CONFIG.CELL - 6 : px + CONFIG.CELL / 2 - 1;
+                const eyeY = dir === 'up' ? py + 4 : dir === 'down' ? py + CONFIG.CELL - 6 : py + CONFIG.CELL / 2 - 1;
+                ctx.fillRect(eyeX, eyeY, 2, 2);
+                ctx.fillRect((dir === 'left' ? px + 10 : dir === 'right' ? px + CONFIG.CELL - 12 : px + CONFIG.CELL / 2 + 2), dir === 'up' ? py + 4 : dir === 'down' ? py + CONFIG.CELL - 6 : py + CONFIG.CELL / 2 + 2, 2, 2);
+              }
+            }
+          }
+
+          // particles
+          for (const p of gameWorld.particles) {
+            ctx.fillStyle = p.color;
+            ctx.globalAlpha = Math.max(0, p.life);
+            ctx.fillRect(CONFIG.PLAY_X + p.x * CONFIG.CELL, CONFIG.PLAY_Y + p.y * CONFIG.CELL, p.size, p.size);
+            ctx.globalAlpha = 1;
+          }
+
+          // HUD overlay
+          ctx.fillStyle = '#9bbc0f';
+          ctx.font = 'bold 20px monospace';
+          ctx.fillText('SCORE ' + gameWorld.score, 40, 35);
+          ctx.fillText(currentLevel ? currentLevel.name.toUpperCase() : 'LEVEL', 330, 35);
+          ctx.fillText('APPLES ' + gameWorld.applesEaten + '/' + currentLevel.applesToClear, 700, 35);
+          ctx.fillStyle = '#8bac0f';
+          ctx.fillText('X' + gameWorld.comboLevel, 40, 60);
+          const comboW = 130;
+          ctx.fillStyle = '#306230';
+          ctx.fillRect(90, 48, comboW, 10);
+          ctx.fillStyle = '#9bbc0f';
+          ctx.fillRect(90, 48, comboW * (gameWorld.comboTimer / CONFIG.comboWindow), 10);
+
+          // right side
+          ctx.fillStyle = '#1c4221';
+          ctx.fillRect(540, 90, 210, 420);
+          ctx.strokeStyle = '#9bbc0f';
+          ctx.strokeRect(540, 90, 210, 420);
+          ctx.fillStyle = '#9bbc0f';
+          ctx.font = '16px monospace';
+          ctx.fillText('RIVALS', 560, 120);
+          for (let i = 1; i < gameWorld.snakes.length; i++) {
+            const rival = gameWorld.snakes[i];
+            const y = 145 + (i - 1) * 55;
+            ctx.fillStyle = rival.alive ? '#9bbc0f' : '#6b4a12';
+            ctx.fillText((rival.alive ? '• ' : '✕ ') + rival.name, 560, y);
+            ctx.fillText('LEN ' + rival.length(), 700, y);
+          }
+
+          // whispers
+          if (gameWorld.whisperTimer > 0 && gameWorld.whisperText) {
+            ctx.fillStyle = 'rgba(155,188,15,0.8)';
+            ctx.fillRect(160, 20, 580, 28);
+            ctx.fillStyle = '#0f380f';
+            ctx.fillText(gameWorld.whisperText, 180, 40);
+          }
+
+          ctx.restore();
+        }
+
+        function renderPause() {
+          renderGame();
+          ctx.fillStyle = 'rgba(0,0,0,0.45)';
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+          ctx.fillStyle = '#e8f0d8';
+          ctx.font = '28px monospace';
+          ctx.fillText('PAUSED', 360, 260);
+        }
+
+        function renderDead() {
+          renderGame();
+          ctx.fillStyle = 'rgba(0,0,0,0.4)';
+          ctx.fillRect(0,0,canvas.width,canvas.height);
+          ctx.fillStyle = '#e8f0d8';
+          ctx.font = 'bold 26px monospace';
+          ctx.fillText('YOU DIED', 350, 200);
+          ctx.font = '18px monospace';
+          ctx.fillText('CAUSE: ' + (gameWorld.deathReason || 'Wall'), 250, 240);
+          ctx.fillText('SCORE: ' + gameWorld.score, 250, 275);
+          ctx.fillText('APPLES: ' + gameWorld.applesEaten, 250, 305);
+          ctx.fillText('LEVEL: ' + levelIndex, 250, 335);
+          ctx.fillText('BEST: ' + (SAVE.bestScores[levelIndex] || 0), 250, 365);
+          ctx.fillText('RETRY', 250, 430);
+          ctx.fillText('LEVEL SELECT', 250, 460);
+          ctx.fillText('TITLE', 250, 490);
+        }
+
+        function renderClear() {
+          renderGame();
+          ctx.fillStyle = 'rgba(11,20,10,0.55)';
+          ctx.fillRect(0,0,canvas.width,canvas.height);
+          ctx.fillStyle = '#e8f0d8';
+          ctx.font = 'bold 26px monospace';
+          ctx.fillText('LEVEL CLEAR', 310, 210);
+          ctx.font = '18px monospace';
+          ctx.fillText('SCORE: ' + gameWorld.score, 300, 260);
+          ctx.fillText('APPLES: ' + gameWorld.applesEaten, 300, 290);
+          ctx.fillText('TIME: ' + Math.floor((performance.now() - gameWorld.levelStartTime) / 1000) + 's', 300, 320);
+          ctx.fillText('CONTINUE', 330, 410);
+        }
+
+        function renderEnding() {
+          ctx.fillStyle = '#0f380f';
+          ctx.fillRect(0,0,canvas.width,canvas.height);
+          ctx.fillStyle = '#e8f0d8';
+          ctx.font = 'bold 26px monospace';
+          ctx.fillText('THE LAST APPLE', 250, 140);
+          ctx.font = '18px monospace';
+          ctx.fillText('CONSUME', 280, 260);
+          ctx.fillText('REFUSE', 280, 310);
+          ctx.fillText('PRESS SPACE TO CHOOSE', 220, 420);
+        }
+
+        function renderLore() {
+          ctx.fillStyle = '#0f380f';
+          ctx.fillRect(0,0,canvas.width,canvas.height);
+          ctx.fillStyle = '#e8f0d8';
+          ctx.font = '22px monospace';
+          ctx.fillText('LORE LOG', 360, 60);
+          ctx.font = '16px monospace';
+          const whispers = SAVE.lore || [];
+          if (!whispers.length) {
+            ctx.fillText('THE GARDEN IS QUIET.', 200, 140);
+          } else {
+            for (let i = 0; i < whispers.length; i++) {
+              ctx.fillText(whispers[i], 120, 120 + i * 28);
+            }
+          }
+          ctx.fillText('PRESS ESC TO RETURN', 270, 610);
+        }
+
+        function renderOptions() {
+          ctx.fillStyle = '#0f380f';
+          ctx.fillRect(0,0,canvas.width,canvas.height);
+          ctx.fillStyle = '#e8f0d8';
+          ctx.font = '22px monospace';
+          ctx.fillText('OPTIONS', 390, 70);
+          ctx.font = '18px monospace';
+          const items = [
+            'VOLUME: ' + SAVE.settings.volume.toFixed(2),
+            'SFX: ' + SAVE.settings.sfx.toFixed(2),
+            'SCREEN SHAKE: ' + (SAVE.settings.shake ? 'ON' : 'OFF'),
+            'SCANLINES: ' + (SAVE.settings.scanlines ? 'ON' : 'OFF'),
+            'DIFFICULTY: ' + SAVE.settings.difficulty.toUpperCase(),
+            'RESET PROGRESS'
+          ];
+          for (let i = 0; i < items.length; i++) {
+            ctx.fillText(items[i], 200, 140 + i * 40);
+          }
+        }
+
+        function renderLevelSelect() {
+          ctx.fillStyle = '#0f380f';
+          ctx.fillRect(0,0,canvas.width,canvas.height);
+          ctx.fillStyle = '#e8f0d8';
+          ctx.font = '22px monospace';
+          ctx.fillText('LEVEL SELECT', 330, 60);
+          ctx.font = '16px monospace';
+          for (let i = 1; i <= 12; i++) {
+            const x = 180 + ((i - 1) % 3) * 180;
+            const y = 120 + Math.floor((i - 1) / 3) * 90;
+            ctx.fillText(i + ': ' + Levels.list[i - 1].name.toUpperCase(), x, y);
+          }
+        }
+
+        function render() {
+          if (state.current === 'BOOT') return renderBoot();
+          if (state.current === 'TITLE') return renderTitle();
+          if (state.current === 'INTRO') return renderIntro();
+          if (state.current === 'PLAY') return renderGame();
+          if (state.current === 'PAUSE') return renderPause();
+          if (state.current === 'DEAD') return renderDead();
+          if (state.current === 'CLEAR') return renderClear();
+          if (state.current === 'ENDING') return renderEnding();
+          if (state.current === 'LORE') return renderLore();
+          if (state.current === 'OPTIONS') return renderOptions();
+          if (state.current === 'LEVEL_SELECT') return renderLevelSelect();
+        }
+
+        document.addEventListener('keydown', (e) => {
+          if (e.key === 'ArrowUp' || e.key === 'w' || e.key === 'W') nextTitleOption(-1);
+          if (e.key === 'ArrowDown' || e.key === 's' || e.key === 'S') nextTitleOption(1);
+          if (e.key === 'Enter' && state.current === 'TITLE') confirmTitle();
+          if (e.key === 'Escape' && state.current === 'LORE') closeLore();
+          if (e.key === 'Escape' && state.current === 'LEVEL_SELECT') setState('TITLE');
+          if (state.current === 'TITLE' && e.key === ' ') confirmTitle();
+        });
+
+        return {
+          state,
+          setState,
+          update,
+          render,
+          setupLevel,
+          confirmTitle,
+          retryLevel,
+          openLore,
+          closeLore,
+          togglePause,
+          advanceIntro,
+          advanceEnding,
+          continueToNextLevel,
+          get state() { return state.current; },
+          player: () => gameWorld.player,
+          getLevelIndex: () => levelIndex,
+          save: persistProgress,
+          message: gameWorld.message,
+          titleMenuIndex: () => gameWorld.titleMenuIndex,
+          get world() { return gameWorld; }
+        };
+      })();
+
+      function loop(ts) {
+        if (!lastFrameTime) lastFrameTime = ts;
+        const dt = Math.min(32, ts - lastFrameTime);
+        lastFrameTime = ts;
+        Game.update(dt / 1000);
+        Game.render();
+        requestAnimationFrame(loop);
+      }
+
+      function init() {
+        SAVE = Storage.load();
+        Audio.ensureContext();
+        Game.setupLevel(1);
+        requestAnimationFrame(loop);
+      }
+
+      window.Game = Game;
+      init();
+    })();
+  </script>
+</body>
+</html>
